@@ -1,0 +1,118 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ---------- user profile ----------
+    match /users/{uid} {
+      allow read: if request.auth != null;
+      allow write: if request.auth != null && request.auth.uid == uid;
+    }
+
+    // ---------- presence sessions ----------
+    match /sessions/{uid} {
+      allow read: if request.auth != null;
+      allow write: if request.auth != null && request.auth.uid == uid;
+    }
+
+    // ---------- games ----------
+    match /games/{gameId} {
+
+      function isAuthed() {
+        return request.auth != null;
+      }
+
+      function isHost() {
+        return resource.data.hostId == request.auth.uid;
+      }
+
+      function isExistingPlayer() {
+        return request.auth.uid in resource.data.players;
+      }
+
+      function isSelfJoining() {
+        // Caller is adding themselves to players on this write
+        return request.auth.uid in request.resource.data.players
+          && !(request.auth.uid in resource.data.players);
+      }
+
+      // Immutable fields — gameId / partyCode / hostId / hostName / hostSubnet / createdAt
+      function immutablesUnchanged() {
+        return request.resource.data.gameId == resource.data.gameId
+          && request.resource.data.partyCode == resource.data.partyCode
+          && request.resource.data.hostId == resource.data.hostId
+          && request.resource.data.hostName == resource.data.hostName
+          && request.resource.data.createdAt == resource.data.createdAt;
+      }
+
+      // Settings can only be changed by host. Also validates bounds.
+      function settingsChangeIsHostOnly() {
+        return request.resource.data.settings == resource.data.settings
+          || isHost();
+      }
+
+      function settingsAreValid() {
+        let s = request.resource.data.settings;
+        return s.maxPlayers is int && s.maxPlayers >= 2 && s.maxPlayers <= 10
+          && s.minPlayers is int && s.minPlayers >= 2 && s.minPlayers <= s.maxPlayers
+          && s.turnDurationSeconds is int && s.turnDurationSeconds >= 3 && s.turnDurationSeconds <= 60
+          && s.boardSize is int && (s.boardSize == 5 || s.boardSize == 6 || s.boardSize == 7);
+      }
+
+      // Non-host can only mutate their own player entry (for ready toggle, leave, etc.).
+      // Host can mutate any players entry (start/reset regenerates everyone's cards).
+      function playersDiffIsSafe() {
+        return isHost()
+          || request.resource.data.players.diff(resource.data.players).affectedKeys().hasOnly([request.auth.uid]);
+      }
+
+      // Validate the shape of a brand-new game document.
+      function newGameIsWellFormed() {
+        let d = request.resource.data;
+        return d.hostId == request.auth.uid
+          && d.status == "waiting"
+          && d.calledNumbers.size() == 0
+          && d.winners.size() == 0
+          && d.currentNumber == null
+          && d.currentTurnUid == null
+          && d.turnDeadline == null
+          && d.players.size() == 1
+          && request.auth.uid in d.players;
+      }
+
+      allow read: if isAuthed();
+
+      allow create: if isAuthed()
+        && newGameIsWellFormed()
+        && settingsAreValid();
+
+      // Players or the host can update; specific guards enforce scope.
+      allow update: if isAuthed()
+        && (isHost() || isExistingPlayer() || isSelfJoining())
+        && immutablesUnchanged()
+        && settingsChangeIsHostOnly()
+        && settingsAreValid()
+        && playersDiffIsSafe();
+
+      // Only the host can wipe the game (Leave-as-host or Abort).
+      allow delete: if isAuthed() && isHost();
+    }
+
+    // ---------- invites ----------
+    match /invites/{inviteId} {
+      allow read: if request.auth != null && (
+        resource.data.fromUid == request.auth.uid ||
+        resource.data.toUid == request.auth.uid
+      );
+      allow create: if request.auth != null
+        && request.resource.data.fromUid == request.auth.uid;
+      allow update: if request.auth != null && (
+        resource.data.fromUid == request.auth.uid ||
+        resource.data.toUid == request.auth.uid
+      );
+      allow delete: if request.auth != null && (
+        resource.data.fromUid == request.auth.uid ||
+        resource.data.toUid == request.auth.uid
+      );
+    }
+  }
+}
